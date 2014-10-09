@@ -1,0 +1,16 @@
+{
+    "name": "modular",
+    "version": "0.0.1",
+    "main": "index.js",
+    "description": "a nodejs framework for advanced web applications",
+    "dependencies": {
+        "q": "1.x"
+    },
+    "devDependencies": {
+        "jasmine-node": "*",
+        "supertest": "*"
+    },
+    "scripts": {
+        "test": "jasmine-node tests"
+    }
+}
