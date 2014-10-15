@@ -1,7 +1,7 @@
+test:
+	@npm test
 start:
 	@supervisor app.js &
-test:
-	@jasmine-node test
 commit:
 	@git add .
 	@git commit -am"${message} : `date`" | :

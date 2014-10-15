@@ -7,10 +7,10 @@
         "q": "1.x"
     },
     "devDependencies": {
-        "jasmine-node": "*",
+        "jasmine-node": "2.x",
         "supertest": "*"
     },
     "scripts": {
-        "test": "jasmine-node tests"
+        "test": "jasmine-node tests  --captureExceptions  --verbose"
     }
 }

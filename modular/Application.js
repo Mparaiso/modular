@@ -19,30 +19,35 @@ function Application() {
     /**
      * server request handler
      * @type requestListener
-     * @param {http.IncomingMessage} req
-     * @param {http.ServerResponse} res
+     * @param {http.IncomingMessage} request
+     * @param {http.ServerResponse} response
      */
-    function handler(req, res) {
-        handler.server = this;
-        handler.emit(Application.event.SERVER_REQUEST, req, res, handler);
+    function handler(request, response) {
+        handler.emit(Application.event.SERVER_REQUEST, {
+            request: request,
+            response: response,
+            server: this,
+            application: handler
+        });
     }
 
     /** configure the injector */
     injector
+        .value('$router', router)
         .value('$injector', injector)
+        .value('$emitter', emitter)
         .service('$application', function () {
             return handler;
         }).service('$q', function () {
             return q;
-        })
-        .service('$emitter', function () {
-            return emitter;
         });
     /** expose router methods */
-    ['get', 'post', 'put', 'delete', 'patch', 'head', 'options'].forEach(function (method) {
-        handler[method] = router[method].bind(router);
+    ['post', 'put', 'delete', 'patch', 'head', 'options'].forEach(function (method) {
+        handler[method] = function () {
+            var $router = handler.injector.get('$router');
+            return $router[method].apply($router, [].slice.call(arguments));
+        }
     });
-    handler.router = router;
     /** expose injector methods */
     ['service', 'value', 'inject'].forEach(function (method) {
         handler[method] = injector[method].bind(injector);
@@ -57,9 +62,22 @@ function Application() {
         'setMaxListeners',
         'listeners',
         'emit'].forEach(function (method) {
-            //handler[method] = emitter[method].bind(emitter);
-            handler[method] = emitter[method].bind(emitter);
+            handler[method] = function () {
+                var $emitter = handler.injector.get('$emitter');
+                return $emitter[method].apply($emitter, [].slice.call(arguments));
+            };
         });
+    /** depending on the number of arguments,either call injector.get or router.get */
+    handler.get = function get() {
+        if (arguments.length <= 1) {
+            return this.injector.get.apply(this.injector, [].slice.call(arguments));
+        }
+        var $router = this.injector.get('$router');
+        return $router.get.apply($router, [].slice.call(arguments));
+    }
+    handler.dispose = function () {
+        handler.removeAllListeners();
+    };
     /** register server events **/
     handler.on(Application.event.SERVER_REQUEST, Application.serverRequestListener);
     handler.on(Application.event.APPLICATION_RESPONSE_ERROR, Application.responseErrorListener);
@@ -81,35 +99,60 @@ Application.event = {
     SERVER_REQUEST: 'SERVER_REQUEST',
     APPLICATION_REQUEST_FINISH: 'APPLICATION_REQUEST_FINISH',
 }
-Application.serverRequestListener = function serverRequestListener(req, res, handler) {
+Application.serverRequestListener = function serverRequestListener(event) {
     var injectorClone, args, callbacks, finish,
-        match, output, urlObject = url.parse(req.url, true),
-        $q = handler.inject('$q'),chain = $q.when(true);
-    res.on('close', function () {
-        handler.emit(Application.event.SERVER_RESPONSE_CLOSE, this, handler);
-    }).on('finish', function () {
-        handler.emit(Application.event.SERVER_RESPONSE_FINISH, this, handler);
+        match, output,
+        request = event.request,
+        response = event.response,
+        application = event.application,
+        urlObject = url.parse(request.url, true),
+        injectorClone = application.injector.clone(),
+        $q = application.inject('$q'),
+        chain = $q.when(true);
+    response.on('close', function () {
+        application.emit(Application.event.SERVER_RESPONSE_CLOSE, {
+            response: response,
+            request: request,
+            application: application
+        });
     });
-    handler.emit(Application.event.APPLICATION_BEFORE_REQUEST,req,res,chain,handler);
-    match = handler.router.match(urlObject.pathname, req.method);
+    response.on('finish', function () {
+        application.emit(Application.event.SERVER_RESPONSE_FINISH, {
+            response: response,
+            request: request,
+            application: application
+        });
+    });
+    application.emit(Application.event.APPLICATION_BEFORE_REQUEST, {
+        request: request,
+        response: response,
+        chain: chain,
+        application: application
+    });
+    match = application.get('$router').match(urlObject.pathname, request.method);
     if (match) {
         /* create a local injector so request and reponses objects are scoped */
-        injectorClone = handler.injector.clone();
-        injectorClone.value('$request', req)
-            .value('$response', res)
+        injectorClone.value('$request', request)
+            .value('$response', response)
             .value('$url', urlObject)
             .value('$routeParams', match.paramsFromUrl(urlObject.pathname) || {})
             .value('$query', urlObject.query || {});
         callbacks = match.getAllCallbacks();
+        /** set finish callback */
         if (match.finish.length > 0) {
-            res.on('close', function () {
+            application.on(Application.event.SERVER_RESPONSE_FINISH, function (event) {
                 match.finish().slice().reduce(function (chain, callback, array) {
                     return chain.then(function () {
                         return callback.apply(this, injectorClone.getFunctionArgValues(callback));
                     })
                 }, $q.when(true))
                     .catch(function (err) {
-                        handler.emit(Application.event.APPLICATION_ERROR, req, res, err, handler);
+                        application.emit(Application.event.APPLICATION_ERROR, {
+                            request: request,
+                            response: response,
+                            error: error,
+                            application: application
+                        });
                     });
             })
         }
@@ -124,25 +167,31 @@ Application.serverRequestListener = function serverRequestListener(req, res, han
             .then(function ($output) {
                 switch (true) {
                     case typeof $output === "string":
-                        res.end($output);
+                        response.end($output);
                         break;
-                    default:
-                        res.end();
                 }
             })
             .catch(function (err) {
-                console.log(Application.event.APPLICATION_RESPONSE_ERROR, err);
-                handler.emit(Application.event.APPLICATION_RESPONSE_ERROR, req, res, err.stack, handler);
+                application.emit(Application.event.APPLICATION_RESPONSE_ERROR, {
+                    request: request,
+                    response: response,
+                    error: err.stack,
+                    application: application
+                });
             })
-            .done();
+            .finally(function () {
+                if (false == response.complete) {
+                    response.end();
+                }
+            });
     } else {
-        res.statusCode = 404;
-        res.end(req.url + ' Not Found');
+        response.statusCode = 404;
+        response.end(request.url + ' Not Found');
     }
 };
-Application.responseErrorListener = function (req, res, error, handler) {
-    res.statusCode = 500;
-    res.end(error);
+Application.responseErrorListener = function (event) {
+    event.response.statusCode = 500;
+    event.response.end(event.error);
 };
 module.exports = Application;
 
